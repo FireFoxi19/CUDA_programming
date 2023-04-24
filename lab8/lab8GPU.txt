@@ -1,0 +1,68 @@
+#include <malloc.h>
+#include <cstdlib>
+#include <ctime>
+#include <iostream>
+#include <cuda_runtime.h>
+#include "device_launch_parameters.h"
+#define M 512
+#define K 1024
+#define N 1024
+#define REAL 1024
+#define BLOCK_DIM 16
+
+__global__ void gMultMats(float* A, float* B, float* C)
+{
+	int n = threadIdx.x + blockIdx.x*blockDim.x;
+	int m = threadIdx.y + blockIdx.y*blockDim.y;
+
+	float multiSum=0.0;
+
+	for(int i = 0; i<K; ++i)
+
+ 	multiSum += A[i+m*K]*B[n+i*N];
+	C[n+m*N] = multiSum;
+}
+
+__global__ void gInit(float* D, int s)
+{
+	int j=threadIdx.x + blockIdx.x*blockDim.x;
+	int i=threadIdx.y+blockIdx.y*blockDim.y;
+	int J=blockDim.x*gridDim.x;
+	D[j+i*J]=s*(float)((j+i*J)*1.0E-5)+(1-s)*1.0f;
+}
+
+int main(){
+	float *A, *B, *C;
+	float tmr = 0;
+
+	cudaEvent_t start, stop;
+
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	cudaMalloc((void**)&A, M*K*sizeof(float));
+	cudaMalloc((void**)&B, M*K*sizeof(float));
+	cudaMalloc((void**)&C, M*K*sizeof(float));
+
+	gInit<<<dim3(K/32,M/32),dim3(32,32)>>>(A,1);
+
+	cudaDeviceSynchronize();
+
+	gInit<<<dim3(N/32,K/32),dim3(32,32)>>>(B,0);
+
+	cudaDeviceSynchronize();
+
+	cudaMemset(C,0,M*N*sizeof(REAL));
+	cudaEventRecord(start, 0);
+
+	gMultMats<<<dim3(N/BLOCK_DIM, M/BLOCK_DIM),dim3(BLOCK_DIM,BLOCK_DIM)>>>(A,B,C);
+
+	cudaDeviceSynchronize();
+
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
+
+	cudaEventElapsedTime(&tmr, start, stop);
+
+	printf("GPU time:%f msecs.\n", tmr);
+}

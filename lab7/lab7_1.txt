@@ -1,0 +1,136 @@
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#ifndef __CUDACC__
+#define __CUDACC__
+#endif
+#include <device_functions.h>
+
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/inner_product.h>
+
+
+#include <locale.h>
+
+#include <iostream>
+#include <string>
+#include <chrono>
+#include <cmath>
+
+#include <fstream>
+#include <stdlib.h>
+#include <stdio.h>
+
+#include <curand.h>
+#include <curand_kernel.h>
+
+
+#define THREADS_PER_BLOCK 256
+
+__global__ void dot_product(int n, float* a, float* b, float* c) {
+    __shared__ float cache[THREADS_PER_BLOCK];
+
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    float sum = 0.0f;
+
+    while (i < n) {
+        sum += a[i] * b[i];
+        i += blockDim.x * gridDim.x;
+    }
+
+    cache[tid] = sum;
+
+    __syncthreads();
+
+    int idx = blockDim.x / 2;
+
+    while (idx != 0) {
+        if (tid < idx) {
+            cache[tid] += cache[tid + idx];
+        }
+        __syncthreads();
+        idx /= 2;
+    }
+
+    if (tid == 0) {
+        c[blockIdx.x] = cache[0];
+    }
+}
+
+
+int main() {
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    float time;
+
+    float* a, * b, * c, * d_a, * d_b, * d_c;
+
+
+for (int n = 1<<5; n < 1 << 25; n <<= 2){
+        printf("\n\n~ size = %d ~\n\n", n);
+        float dot_sum = 0.0f;
+        a = (float*)malloc(n * sizeof(float));
+        b = (float*)malloc(n * sizeof(float));
+        c = (float*)malloc(THREADS_PER_BLOCK * sizeof(float));
+        thrust::host_vector<float> h_a(n);
+        thrust::host_vector<float> h_b(n);
+
+        cudaMalloc(&d_a, n * sizeof(float));
+        cudaMalloc(&d_b, n * sizeof(float));
+        cudaMalloc(&d_c, THREADS_PER_BLOCK * sizeof(float));
+
+        for (int i = 0; i < n; ++i) {
+            a[i] = rand() / (float)RAND_MAX;
+            b[i] = rand() / (float)RAND_MAX;
+            h_a[i] = a[i];
+            h_b[i] = b[i];
+        }
+
+        cudaMemcpy(d_a, a, n * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, b, n * sizeof(float), cudaMemcpyHostToDevice);
+
+        cudaEventRecord(start, 0);
+        dot_product << <128, THREADS_PER_BLOCK >> > (n, d_a, d_b, d_c);
+        cudaDeviceSynchronize();
+        cudaMemcpy(c, d_c, THREADS_PER_BLOCK * sizeof(float), cudaMemcpyDeviceToHost);
+
+
+        for (int i = 0; i < 128; ++i) {
+            dot_sum += c[i];
+        }
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&time, start, stop);
+
+
+        printf("CUDA API product result:    %f ; time = %f\n", dot_sum, time);
+
+
+
+        thrust::device_vector<float> Td_a = h_a;
+        thrust::device_vector<float> Td_b = h_b;
+
+        cudaEventRecord(start, 0);
+        dot_sum = thrust::inner_product(Td_a.begin(), Td_a.end(), Td_b.begin(), 0.0f);
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&time, start, stop);
+
+        printf("Thrust product result:      %f ; time = %f\n", dot_sum, time);
+    }
+
+    printf("\n\n\n");
+    free(a);
+    free(b);
+    free(c);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+
+    return 0;
+}

@@ -1,0 +1,173 @@
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#ifndef __CUDACC__
+#define __CUDACC__
+#endif
+#include <device_functions.h>
+
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/inner_product.h>
+#include <thrust/gather.h>
+
+#include <locale.h>
+
+#include <iostream>
+#include <string>
+#include <chrono>
+#include <cmath>
+
+#include <fstream>
+#include <stdlib.h>
+#include <stdio.h>
+
+#include <curand.h>
+#include <curand_kernel.h>
+
+
+using namespace std;
+
+#define SH_DIM 32
+
+
+__global__ void vectors_fill(int* a, int N) {
+
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < N) a[i] = i;
+
+}
+
+__global__ void indices_fill(int* indices, int column, int row) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < column * row)
+        indices[i] = (i % column) * row + (i / column);
+}
+
+
+
+__global__ void vectors_transpose2(int* a, int* b, int rows, int col) {
+
+    __shared__ int cache[SH_DIM][SH_DIM + 1];
+
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int ti, tj;
+
+    ti = threadIdx.x;
+    tj = threadIdx.y;
+    cache[ti][tj] = a[j * col + i];
+
+    __syncthreads();
+
+    i = threadIdx.x + blockIdx.y * blockDim.x;
+    j = threadIdx.y + blockIdx.x * blockDim.y;
+    b[j * rows + i] = cache[tj][ti];
+
+
+}
+
+void showVec(int* arr, int rows, int col) {
+    int pos = 0;
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < col; j++) {
+            cout << arr[pos++] << "\t";
+        }
+        cout << "\n";
+    }
+}
+
+int main(int argc, char* argv[]) {
+    setlocale(LC_ALL, "Russian");
+
+    float elapsedTime;
+    cudaEvent_t start, stop;
+
+    int* arr1, * arr2, * arr1_gpu, * arr2_gpu;
+
+    for (int rows= 1 << 4, col= 1 << 4; rows*col < 1 << 24; rows <<= 2, col <<= 2) {
+
+        cout << "\n\n ~ Размер матрицы: " << rows << " x " << col << " ~ \n\n";
+
+        int N = rows * col;
+        dim3 threads_per_block(32, 32, 1);
+        int bCol, bRows;
+
+        if (col % 32 == 0)
+            bCol = col / 32;
+        else bCol = col / 32 + 1;
+
+        if (rows % 32 == 0)
+            bRows = rows / 32;
+        else bRows = rows / 32 + 1;
+
+        dim3 num_of_blocks(bCol, bRows, 1);
+
+        arr1 = new int[N];
+        arr2 = new int[N];
+
+        cudaMalloc(&arr1_gpu, N * sizeof(float));
+        cudaMalloc(&arr2_gpu, N * sizeof(float));
+
+        cudaMemcpy(arr1_gpu, arr1, N * sizeof(float), cudaMemcpyHostToDevice);
+
+        vectors_fill << <num_of_blocks.x * num_of_blocks.y, threads_per_block.x* threads_per_block.y >> > (arr1_gpu, N);
+        cudaDeviceSynchronize();
+
+        cudaMemcpy(arr1, arr1_gpu, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+        thrust::device_vector<float> d_arr1(N);
+        thrust::device_vector<float> d_arr2(N);
+
+        for (int i = 0; i < N; i++) {
+            d_arr1[i] = arr1[i];
+        }
+
+        int* indices;
+        cudaMalloc((void**)&indices, N * sizeof(int));
+
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        cudaEventRecord(start, 0);
+
+        indices_fill << < num_of_blocks, threads_per_block >> > (indices, col, rows);
+        cudaDeviceSynchronize();
+
+        thrust::device_vector<int> d_indices(indices, indices + N);
+        thrust::gather(d_indices.begin(), d_indices.end(), d_arr1.begin(), d_arr2.begin());
+
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&elapsedTime, start, stop);
+
+        cout << "\n- Время транспонирования с Thrust =\t" << elapsedTime;
+
+
+        cudaEventRecord(start, 0);
+        vectors_transpose2 << <num_of_blocks, threads_per_block >> > (arr1_gpu, arr2_gpu, rows, col);
+        cudaDeviceSynchronize();
+        cudaEventRecord(stop, 0);
+
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&elapsedTime, start, stop);
+        cout << "\n- Время транспонирования с CUDA API =\t" << elapsedTime << "\n\n";
+
+        //cudaMemcpy(arr2, arr2_gpu, N * sizeof(float), cudaMemcpyDeviceToHost);
+        /*showVec(arr1, rows, col);
+        cout << "\n\n";
+        showVec(arr2, col, rows);*/
+    }
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cudaFree(arr1_gpu);
+    cudaFree(arr2_gpu);
+
+    delete[] arr1;
+    delete[] arr2;
+
+    return 0;
+}
