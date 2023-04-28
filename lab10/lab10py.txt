@@ -1,0 +1,12 @@
+import numpy as np
+import time
+
+N = 1000;
+a = np.random.rand(N, N)
+b = np.random.rand(N, N)
+
+start = time.time()
+c = np.dot(a, b)
+end = time.time()
+
+print("time numpy = ", end - start, "sec")
